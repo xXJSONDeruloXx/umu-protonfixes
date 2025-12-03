@@ -27,6 +27,7 @@ exclude = [
     "site-packages",
     "venv",
     "protonfixes_test.py",
+    "optiscaler_test.py",
     "subprojects",
 ]
 
