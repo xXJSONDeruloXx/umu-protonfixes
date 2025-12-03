@@ -304,6 +304,71 @@ class TestOptiScalerFunctions(unittest.TestCase):
         self.assertTrue(result)
         self.assertFalse((self.game_dir / 'some.dll.optiscaler.bak').exists())
 
+    @patch('protonfixes.util.winedll_override')
+    def test_install_optiscaler_backs_up_existing_plugins(
+        self, mock_override: MagicMock
+    ) -> None:
+        """Test that install_optiscaler backs up existing plugins directory."""
+        from protonfixes import util
+
+        # Create existing plugins directory in game
+        existing_plugins = self.game_dir / 'plugins'
+        existing_plugins.mkdir()
+        (existing_plugins / 'original_plugin.dll').write_bytes(b'original plugin')
+
+        with patch.object(
+            util, '_get_optiscaler_source_dir', return_value=self.optiscaler_source
+        ):
+            result = util.install_optiscaler(
+                target_path=str(self.game_dir),
+                dll_name='dxgi.dll',
+            )
+
+        self.assertTrue(result)
+
+        # Backup should exist
+        backup_plugins = self.game_dir / 'plugins.optiscaler.bak'
+        self.assertTrue(backup_plugins.exists())
+        self.assertTrue((backup_plugins / 'original_plugin.dll').exists())
+        self.assertEqual(
+            (backup_plugins / 'original_plugin.dll').read_bytes(),
+            b'original plugin',
+        )
+
+        # New plugins should be installed
+        self.assertTrue((self.game_dir / 'plugins' / 'test_plugin.dll').exists())
+
+    def test_uninstall_optiscaler_restores_plugins_backup(self) -> None:
+        """Test that uninstall_optiscaler restores plugins directory backup."""
+        from protonfixes import util
+
+        # Simulate installed state with plugins backup
+        plugins_dir = self.game_dir / 'plugins'
+        plugins_dir.mkdir()
+        (plugins_dir / 'optiscaler_plugin.dll').write_bytes(b'optiscaler plugin')
+
+        backup_plugins = self.game_dir / 'plugins.optiscaler.bak'
+        backup_plugins.mkdir()
+        (backup_plugins / 'original_plugin.dll').write_bytes(b'original plugin')
+
+        result = util.uninstall_optiscaler(target_path=str(self.game_dir))
+
+        self.assertTrue(result)
+
+        # Original plugins should be restored
+        self.assertTrue(plugins_dir.exists())
+        self.assertTrue((plugins_dir / 'original_plugin.dll').exists())
+        self.assertEqual(
+            (plugins_dir / 'original_plugin.dll').read_bytes(),
+            b'original plugin',
+        )
+
+        # Backup should be removed
+        self.assertFalse(backup_plugins.exists())
+
+        # OptiScaler plugins should be removed
+        self.assertFalse((plugins_dir / 'optiscaler_plugin.dll').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

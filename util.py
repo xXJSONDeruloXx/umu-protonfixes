@@ -1486,7 +1486,13 @@ def install_optiscaler(
     src_plugins = source_dir / 'plugins'
     dst_plugins = target_dir / 'plugins'
     if src_plugins.exists() and src_plugins.is_dir():
-        if dst_plugins.exists():
+        # Backup existing plugins directory if it exists
+        dst_plugins_backup = target_dir / 'plugins.optiscaler.bak'
+        if dst_plugins.exists() and not dst_plugins_backup.exists():
+            log.info('Backing up existing plugins directory')
+            shutil.copytree(dst_plugins, dst_plugins_backup)
+            shutil.rmtree(dst_plugins)
+        elif dst_plugins.exists():
             shutil.rmtree(dst_plugins)
         log.debug('Copying plugins directory')
         shutil.copytree(src_plugins, dst_plugins)
@@ -1551,11 +1557,16 @@ def uninstall_optiscaler(target_path: Optional[StrPath] = None) -> bool:
                     log.debug(f'Removing {filepath.name}')
                     filepath.unlink()
 
-    # Remove plugins directory
+    # Remove plugins directory and restore backup if it exists
     plugins_dir = target_dir / 'plugins'
+    plugins_backup = target_dir / 'plugins.optiscaler.bak'
     if plugins_dir.exists() and plugins_dir.is_dir():
         log.debug('Removing plugins directory')
         shutil.rmtree(plugins_dir)
+    if plugins_backup.exists() and plugins_backup.is_dir():
+        log.info('Restoring original plugins directory')
+        shutil.copytree(plugins_backup, plugins_dir)
+        shutil.rmtree(plugins_backup)
 
     # Clean up any remaining .optiscaler.bak files
     for backup_file in target_dir.glob('*.optiscaler.bak'):
