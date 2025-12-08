@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -111,9 +112,21 @@ def __get_fsr4_int8_dlls(version: str = 'default') -> dict:
     """Get FSR4 INT8 (unofficial) dll info for RDNA2/RDNA3
 
     This uses the community INT8 compiled version of FSR4 which works on
-    RDNA2 and RDNA3 GPUs that lack the official FSR4 ML hardware support. Generally notably faster than the FP8 path on these GPUs, especially RDNA2, but with some quality tradeoffs.
+    RDNA2 and RDNA3 GPUs that lack the official FSR4 ML hardware support.
+    
+    Automatically installs OptiScaler as dxgi.dll to system32/OptiScaler/ which
+    patches amdxcffx64.dll at runtime to use the INT8 model instead of FP8.
     """
-    __fsr4_int8_dlls = {
+    __fsr4_runtime = {
+        '4.0.2': {
+            'version': '4.0.2_68840348eb8000',
+            'download_url': 'https://download.amd.com/dir/bin/amdxcffx64.dll/68840348eb8000/amdxcffx64.dll',
+            'md5_hash': None,
+            'zip_md5_hash': None,
+        },
+    }
+    
+    __fsr4_int8_model = {
         '4.0.2': {
             'version': '4.0.2',
             'download_url': 'https://github.com/xXJSONDeruloXx/OptiScaler-Bleeding-Edge/releases/download/amd-fsr-r-int8/amd_fidelityfx_upscaler_dx12.dll',
@@ -121,13 +134,29 @@ def __get_fsr4_int8_dlls(version: str = 'default') -> dict:
             'zip_md5_hash': None,
         },
     }
+    
+    __optiscaler = {
+        '0.9.0-pre6': {
+            'version': '0.9.0-pre6.20251205',
+            'download_url': '/home/kurt/Downloads/Optiscaler_0.9.0-pre6.20251205/OptiScaler.dll',
+            'md5_hash': None,  # Local file
+            'zip_md5_hash': None,
+        },
+    }
 
-    # its not actually 4.0.2 but when compiled that was the version set in code. The ML2Code shaders actually predate 4.0.0, Just mirroring the other DL here.
-    if version == 'default' or version not in __fsr4_int8_dlls:
+    # Default to 4.0.2 if no explicit version or unknown version requested
+    if version == 'default' or version not in __fsr4_int8_model:
         version = '4.0.2'
 
     return {
-        'drive_c/windows/system32/amd_fidelityfx_upscaler_dx12.dll': __fsr4_int8_dlls[version],
+        # FSR4 runtime DLL - required for FSR4 to work at all
+        'drive_c/windows/system32/amdxcffx64.dll': __fsr4_runtime[version],
+        # INT8 model DLLs - OptiScaler patches amdxcffx64.dll to load these instead of FP8
+        # Install with both naming conventions for compatibility
+        'drive_c/windows/system32/amd_fidelityfx_upscaler_dx12.dll': __fsr4_int8_model[version],
+        'drive_c/windows/system32/amd_fidelityfx_dx12.dll': __fsr4_int8_model[version],
+        # OptiScaler as dxgi.dll in OptiScaler subdirectory - will be loaded via WINEDLLOVERRIDES
+        'drive_c/windows/system32/OptiScaler/dxgi.dll': __optiscaler['0.9.0-pre6'],
     }
 
 
@@ -202,7 +231,21 @@ def __download_upscaler_files(
         try:
             if file.exists():
                 file.rename(temp)
-            dlfunc(files[dst], cache_dir, file)
+            
+            # Choose download function based on file type/source
+            download_url = files[dst].get('download_url', '')
+            
+            # Check if it's a local file path
+            if download_url.startswith('/') or download_url.startswith('~'):
+                # Local file - just copy it
+                local_path = Path(download_url).expanduser()
+                file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(local_path, file)
+            elif download_url.endswith('.7z'):
+                __download_extract_7z(files[dst], cache_dir, file)
+            else:
+                dlfunc(files[dst], cache_dir, file)
+            
             if temp.exists():
                 temp.unlink(missing_ok=True)
         except Exception as e:
@@ -254,6 +297,45 @@ def __download_fsr4(file: dict, cache: Path, dst: Path) -> None:
         __download_file(file['download_url'], cached_file)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(cached_file, dst)
+
+
+def __download_extract_7z(file: dict, cache: Path, dst: Path) -> None:
+    """Download and extract 7z archive, extracting specific file to destination"""
+    url_path = Path(unquote(urlparse(file['download_url']).path))
+    cached_file = cache.joinpath(url_path.name)
+    
+    # Download if not cached
+    if not cached_file.exists():
+        __download_file(file['download_url'], cached_file)
+    
+    # Extract the specific file we need (OptiScaler.dll -> dxgi.dll)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Use 7z command to extract just the file we need
+    try:
+        # Extract OptiScaler.dll from the archive
+        subprocess.run(
+            ['7z', 'e', '-y', f'-o{dst.parent}', str(cached_file), 'OptiScaler.dll'],
+            check=True,
+            capture_output=True
+        )
+        # Rename OptiScaler.dll to our target name (e.g., dxgi.dll)
+        extracted = dst.parent / 'OptiScaler.dll'
+        if extracted.exists():
+            extracted.rename(dst)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log.warn(f'Failed to extract 7z with 7z command: {e}')
+        # Fallback: try with python library if available
+        try:
+            import py7zr
+            with py7zr.SevenZipFile(cached_file, 'r') as archive:
+                archive.extract(targets=['OptiScaler.dll'], path=dst.parent)
+                extracted = dst.parent / 'OptiScaler.dll'
+                if extracted.exists():
+                    extracted.rename(dst)
+        except ImportError:
+            log.crit('Neither 7z command nor py7zr module available for extracting 7z files')
+            raise
 
 
 def download_upscaler(
@@ -343,6 +425,10 @@ def setup_upscalers(compat_config: set, env: dict, compat_dir: str, prefix_dir: 
         # same flag tooling expects for "FSR4 is in play".
         # This does NOT mean we're using the FP8/amdxcffx64.dll path.
         env['FSR4_UPGRADE'] = '1'
+        
+        # Add dxgi to DLL overrides to load OptiScaler
+        # OptiScaler is installed as system32/OptiScaler/dxgi.dll
+        loaddll_replace.add('dxgi')
 
     if 'dlss' in loaddll_replace:
         env.setdefault(
