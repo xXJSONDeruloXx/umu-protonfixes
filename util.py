@@ -1452,10 +1452,11 @@ def install_optiscaler(
         log.info(f'Copying OptiScaler.dll as {dll_name}')
         shutil.copy2(src_dll, dst_dll)
 
-        # Set native dll override for the target dll (without extension)
+        # Set native,builtin dll override for the target dll (without extension)
+        # This matches fgmod behavior: native first, builtin as fallback
         dll_base = dll_name.rsplit('.', 1)[0]
         if dll_name != 'OptiScaler.asi':
-            winedll_override(dll_base, OverrideOrder.NATIVE)
+            winedll_override(dll_base, OverrideOrder.NATIVE_BUILTIN)
     else:
         log.warn(f'OptiScaler.dll not found in {source_dir}')
         return False
