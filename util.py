@@ -1,6 +1,7 @@
 """Utilities to make gamefixes easier"""
 
 import configparser
+import glob
 import os
 import sys
 import re
@@ -1229,4 +1230,349 @@ def create_dos_device(
     regedit_add(
         'HKLM\\Software\\Wine\\Drives', f'{letter}:', 'REG_SZ', dev_type.value, True
     )
+    return True
+
+
+# OptiScaler support
+# Valid DLL names that OptiScaler can be renamed to
+OPTISCALER_VALID_DLL_NAMES = frozenset([
+    'dxgi.dll',
+    'winmm.dll',
+    'version.dll',
+    'dbghelp.dll',
+    'd3d12.dll',
+    'wininet.dll',
+    'winhttp.dll',
+    'OptiScaler.asi',
+])
+
+# Core files that should be copied (with special handling)
+OPTISCALER_CORE_FILES = [
+    'OptiScaler.dll',  # Will be renamed to dll_name
+    'OptiScaler.ini',
+]
+
+# Supporting library files to copy as-is
+OPTISCALER_SUPPORT_FILES = [
+    'dlssg_to_fsr3_amd_is_better.dll',
+    'fakenvapi.dll',
+    'fakenvapi.ini',
+    'nvngx.dll',
+    'amd_fidelityfx_dx12.dll',
+    'amd_fidelityfx_vk.dll',
+    'amd_fidelityfx_framegeneration_dx12.dll',
+    'amd_fidelityfx_upscaler_dx12.dll',
+    'libxess.dll',
+    'libxess_dx11.dll',
+    'libxess_fg.dll',
+    'libxell.dll',
+]
+
+# Files to clean up during uninstall
+OPTISCALER_CLEANUP_FILES = [
+    'OptiScaler.ini',
+    'OptiScaler.log',
+    'dlssg_to_fsr3_amd_is_better.dll',
+    'dlssg_to_fsr3.ini',
+    'dlssg_to_fsr3.log',
+    'fakenvapi.dll',
+    'fakenvapi.ini',
+    'fakenvapi.log',
+    'nvngx.dll',
+    'nvngx.ini',
+    'libxess.dll',
+    'libxess_dx11.dll',
+    'libxess_fg.dll',
+    'libxell.dll',
+]
+
+# Glob patterns for cleanup
+OPTISCALER_CLEANUP_PATTERNS = [
+    'amd_fidelityfx_*.dll',
+]
+
+
+def _get_optiscaler_source_dir() -> Path:
+    """Get the path to bundled OptiScaler files."""
+    return Path(__file__).parent / 'optiscaler'
+
+
+def _backup_file(filepath: Path) -> bool:
+    """Create a backup of a file with .optiscaler.bak suffix.
+
+    Args:
+        filepath: Path to the file to backup
+
+    Returns:
+        True if backup was created, False if file doesn't exist or backup exists
+
+    """
+    if not filepath.exists():
+        return False
+
+    backup_path = filepath.with_suffix(filepath.suffix + '.optiscaler.bak')
+    if backup_path.exists():
+        log.debug(f'Backup already exists: {backup_path}')
+        return False
+
+    log.info(f'Creating backup: {filepath} -> {backup_path}')
+    shutil.copy2(filepath, backup_path)
+    return True
+
+
+def _restore_backup(filepath: Path) -> bool:
+    """Restore a file from its .optiscaler.bak backup.
+
+    Args:
+        filepath: Path to the file to restore
+
+    Returns:
+        True if backup was restored, False if no backup exists
+
+    """
+    backup_path = filepath.with_suffix(filepath.suffix + '.optiscaler.bak')
+    if not backup_path.exists():
+        return False
+
+    log.info(f'Restoring backup: {backup_path} -> {filepath}')
+    shutil.copy2(backup_path, filepath)
+    backup_path.unlink()
+    return True
+
+
+def _modify_optiscaler_ini(
+    ini_path: Path, overrides: Mapping[str, Mapping[str, str]]
+) -> bool:
+    """Modify OptiScaler.ini with the provided overrides.
+
+    Args:
+        ini_path: Path to OptiScaler.ini
+        overrides: Dict of section -> key -> value to override
+
+    Returns:
+        True if modifications were applied
+
+    """
+    if not ini_path.exists():
+        log.warn(f'OptiScaler.ini not found at {ini_path}')
+        return False
+
+    if not overrides:
+        return True
+
+    conf = configparser.ConfigParser()
+    # Preserve case for option names
+    conf.optionxform = lambda optionstr: optionstr
+
+    try:
+        conf.read(ini_path, encoding='utf-8')
+    except (OSError, configparser.Error) as e:
+        log.warn(f'Failed to read OptiScaler.ini: {e}')
+        return False
+
+    # Apply overrides
+    for section, options in overrides.items():
+        if not conf.has_section(section):
+            conf.add_section(section)
+        for key, value in options.items():
+            log.debug(f'Setting [{section}] {key} = {value}')
+            conf.set(section, key, value)
+
+    try:
+        with open(ini_path, 'w', encoding='utf-8') as f:
+            conf.write(f)
+        log.info(f'Applied INI overrides to {ini_path}')
+        return True
+    except OSError as e:
+        log.warn(f'Failed to write OptiScaler.ini: {e}')
+        return False
+
+
+def install_optiscaler(
+    target_path: Optional[StrPath] = None,
+    dll_name: str = 'dxgi.dll',
+    ini_overrides: Optional[Mapping[str, Mapping[str, str]]] = None,
+) -> bool:
+    """Install OptiScaler to the game directory.
+
+    OptiScaler enables FSR3 frame generation, XeSS, and other upscaling options
+    in games that support DLSS/FSR/XeSS.
+
+    Args:
+        target_path: Path to install to (defaults to get_game_install_path())
+        dll_name: What to rename OptiScaler.dll to. Valid options are:
+            dxgi.dll (default, most common), winmm.dll, version.dll,
+            dbghelp.dll, d3d12.dll, wininet.dll, winhttp.dll, OptiScaler.asi
+        ini_overrides: Dict of OptiScaler.ini settings to override per-game.
+            Format: {'Section': {'Key': 'value'}}
+
+    Returns:
+        True if installation was successful
+
+    Example:
+        >>> install_optiscaler(
+        ...     target_path="/path/to/game",
+        ...     dll_name="dxgi.dll",
+        ...     ini_overrides={
+        ...         'Spoofing': {'SpoofHAGS': 'true'},
+        ...         'FrameGeneration': {'Enabled': 'true'},
+        ...     }
+        ... )
+
+    """
+    # Validate dll_name
+    if dll_name not in OPTISCALER_VALID_DLL_NAMES:
+        log.warn(
+            f'Invalid dll_name "{dll_name}". '
+            f'Valid options: {", ".join(sorted(OPTISCALER_VALID_DLL_NAMES))}'
+        )
+        return False
+
+    # Determine target directory
+    if target_path is None:
+        target_path = get_game_install_path()
+    target_dir = Path(target_path)
+
+    if not target_dir.exists():
+        log.warn(f'Target directory does not exist: {target_dir}')
+        return False
+
+    source_dir = _get_optiscaler_source_dir()
+    if not source_dir.exists():
+        log.warn(f'OptiScaler source directory not found: {source_dir}')
+        return False
+
+    log.info(f'Installing OptiScaler to {target_dir}')
+
+    # Copy OptiScaler.dll as the specified dll_name
+    src_dll = source_dir / 'OptiScaler.dll'
+    if src_dll.exists():
+        dst_dll = target_dir / dll_name
+        _backup_file(dst_dll)
+        log.info(f'Copying OptiScaler.dll as {dll_name}')
+        shutil.copy2(src_dll, dst_dll)
+
+        # Set native,builtin dll override for the target dll (without extension)
+        # This matches fgmod behavior: native first, builtin as fallback
+        dll_base = dll_name.rsplit('.', 1)[0]
+        if dll_name != 'OptiScaler.asi':
+            winedll_override(dll_base, OverrideOrder.NATIVE_BUILTIN)
+    else:
+        log.warn(f'OptiScaler.dll not found in {source_dir}')
+        return False
+
+    # Copy OptiScaler.ini
+    src_ini = source_dir / 'OptiScaler.ini'
+    dst_ini = target_dir / 'OptiScaler.ini'
+    if src_ini.exists():
+        _backup_file(dst_ini)
+        shutil.copy2(src_ini, dst_ini)
+
+        # Apply ini overrides if provided
+        if ini_overrides:
+            _modify_optiscaler_ini(dst_ini, ini_overrides)
+    else:
+        log.debug('OptiScaler.ini not found in source, skipping')
+
+    # Copy supporting libraries
+    for filename in OPTISCALER_SUPPORT_FILES:
+        src_file = source_dir / filename
+        if src_file.exists():
+            dst_file = target_dir / filename
+            _backup_file(dst_file)
+            log.debug(f'Copying {filename}')
+            shutil.copy2(src_file, dst_file)
+
+    # Copy plugins directory if it exists
+    src_plugins = source_dir / 'plugins'
+    dst_plugins = target_dir / 'plugins'
+    if src_plugins.exists() and src_plugins.is_dir():
+        # Backup existing plugins directory if it exists
+        dst_plugins_backup = target_dir / 'plugins.optiscaler.bak'
+        if dst_plugins.exists() and not dst_plugins_backup.exists():
+            log.info('Backing up existing plugins directory')
+            shutil.copytree(dst_plugins, dst_plugins_backup)
+            shutil.rmtree(dst_plugins)
+        elif dst_plugins.exists():
+            shutil.rmtree(dst_plugins)
+        log.debug('Copying plugins directory')
+        shutil.copytree(src_plugins, dst_plugins)
+
+    log.info('OptiScaler installation complete')
+    return True
+
+
+def uninstall_optiscaler(target_path: Optional[StrPath] = None) -> bool:
+    """Uninstall OptiScaler and restore original files.
+
+    Removes all OptiScaler files from the target directory and restores
+    any backed-up original DLLs.
+
+    Args:
+        target_path: Path to uninstall from (defaults to get_game_install_path())
+
+    Returns:
+        True if uninstallation was performed
+
+    """
+    # Determine target directory
+    if target_path is None:
+        target_path = get_game_install_path()
+    target_dir = Path(target_path)
+
+    if not target_dir.exists():
+        log.warn(f'Target directory does not exist: {target_dir}')
+        return False
+
+    log.info(f'Uninstalling OptiScaler from {target_dir}')
+
+    # Remove renamed OptiScaler DLLs and restore backups
+    for dll_name in OPTISCALER_VALID_DLL_NAMES:
+        dll_path = target_dir / dll_name
+        if dll_path.exists():
+            # Check if there's a backup to restore
+            backup_path = dll_path.with_suffix(dll_path.suffix + '.optiscaler.bak')
+            if backup_path.exists():
+                log.info(f'Restoring original {dll_name}')
+                _restore_backup(dll_path)
+            else:
+                # No backup means OptiScaler created this file
+                log.info(f'Removing {dll_name}')
+                dll_path.unlink()
+
+    # Remove cleanup files
+    for filename in OPTISCALER_CLEANUP_FILES:
+        filepath = target_dir / filename
+        if filepath.exists():
+            # Try to restore backup first
+            if not _restore_backup(filepath):
+                log.debug(f'Removing {filename}')
+                filepath.unlink()
+
+    # Remove files matching cleanup patterns
+    for pattern in OPTISCALER_CLEANUP_PATTERNS:
+        for filepath in glob.glob(str(target_dir / pattern)):
+            filepath = Path(filepath)
+            if filepath.exists():
+                if not _restore_backup(filepath):
+                    log.debug(f'Removing {filepath.name}')
+                    filepath.unlink()
+
+    # Remove plugins directory and restore backup if it exists
+    plugins_dir = target_dir / 'plugins'
+    plugins_backup = target_dir / 'plugins.optiscaler.bak'
+    if plugins_dir.exists() and plugins_dir.is_dir():
+        log.debug('Removing plugins directory')
+        shutil.rmtree(plugins_dir)
+    if plugins_backup.exists() and plugins_backup.is_dir():
+        log.info('Restoring original plugins directory')
+        shutil.copytree(plugins_backup, plugins_dir)
+        shutil.rmtree(plugins_backup)
+
+    # Clean up any remaining .optiscaler.bak files
+    for backup_file in target_dir.glob('*.optiscaler.bak'):
+        log.debug(f'Cleaning up orphaned backup: {backup_file.name}')
+        backup_file.unlink()
+
+    log.info('OptiScaler uninstallation complete')
     return True
