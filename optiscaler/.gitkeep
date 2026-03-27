@@ -1,0 +1,18 @@
+# This directory is intended to contain OptiScaler binary files.
+# The actual binary files (OptiScaler.dll, OptiScaler.ini, etc.) need to be
+# added separately from the OptiScaler project.
+#
+# See: https://github.com/optiscaler/OptiScaler
+#
+# Files expected in this directory:
+# - OptiScaler.dll (core DLL, renamed during installation)
+# - OptiScaler.ini (configuration file)
+# - dlssg_to_fsr3_amd_is_better.dll (Nukem's FSR FG mod)
+# - fakenvapi.dll and fakenvapi.ini (NVIDIA API emulation)
+# - nvngx.dll
+# - amd_fidelityfx_dx12.dll
+# - amd_fidelityfx_vk.dll
+# - amd_fidelityfx_framegeneration_dx12.dll
+# - amd_fidelityfx_upscaler_dx12.dll
+# - libxess.dll, libxess_dx11.dll, libxess_fg.dll, libxell.dll
+# - plugins/ directory (optional)
